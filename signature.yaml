@@ -1,0 +1,6 @@
+path: F:/4course/cv/project/data/merged_gray
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: signature
