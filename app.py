@@ -14,7 +14,6 @@ from ultralytics import YOLO
 
 from predict import Detection, crop_and_clean, load_image, predict
 
-app = FastAPI(title="Signature Detector")
 model: YOLO | None = None
 
 
@@ -50,6 +49,7 @@ async def predict_image(
     grayscale_inference: bool = Query(False),
     clean: bool = Query(False),
     clean_area_percentile: float = Query(50.0, ge=0.0, le=100.0),
+    color_clean: bool = Query(False),
 ):
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -71,7 +71,12 @@ async def predict_image(
         cleaned: List[bytes] = []
         for det in result["detections"]:
             det_obj = Detection(**det)
-            out = crop_and_clean(img, det_obj, area_percentile=clean_area_percentile)
+            out = crop_and_clean(
+                img,
+                det_obj,
+                area_percentile=clean_area_percentile,
+                color_clean=color_clean,
+            )
             buf = io.BytesIO()
             out.save(buf, format="PNG")
             cleaned.append(buf.getvalue())
@@ -92,6 +97,7 @@ async def predict_pdf(
     clean: bool = Query(False),
     dpi: int = Query(250, ge=100, le=400),
     clean_area_percentile: float = Query(50.0, ge=0.0, le=100.0),
+    color_clean: bool = Query(False),
 ):
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -114,7 +120,12 @@ async def predict_pdf(
         )
         if clean:
             cleaned = [
-                crop_and_clean(img, Detection(**det), area_percentile=clean_area_percentile)
+                crop_and_clean(
+                    img,
+                    Detection(**det),
+                    area_percentile=clean_area_percentile,
+                    color_clean=color_clean,
+                )
                 for det in result["detections"]
             ]
             result["cleaned_count"] = len(cleaned)
@@ -133,6 +144,7 @@ def gradio_ui() -> gr.Blocks:
         grayscale_inference,
         clean,
         clean_area_percentile,
+        color_clean,
     ):
         m = get_model()
         result = predict(
@@ -156,7 +168,12 @@ def gradio_ui() -> gr.Blocks:
             for det in result["detections"]:
                 det_obj = Detection(**det)
                 cleaned_gallery.append(
-                    crop_and_clean(img, det_obj, area_percentile=clean_area_percentile)
+                    crop_and_clean(
+                        img,
+                        det_obj,
+                        area_percentile=clean_area_percentile,
+                        color_clean=color_clean,
+                    )
                 )
         return np.array(annotated), cleaned_gallery
 
@@ -183,6 +200,7 @@ def gradio_ui() -> gr.Blocks:
                 step=1.0,
                 label="Порог площади, перцентиль",
             )
+            color_clean = gr.Checkbox(value=False, label="Цветная очистка")
 
         out_gallery = gr.Gallery(
             label="Очищенные подписи",
@@ -202,6 +220,7 @@ def gradio_ui() -> gr.Blocks:
                 grayscale_inference,
                 clean,
                 clean_area_percentile,
+                color_clean,
             ],
             outputs=[out_img, out_gallery],
         )

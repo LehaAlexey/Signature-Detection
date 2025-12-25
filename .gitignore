@@ -1,5 +1,4 @@
 __pycache__/
-*.pyc
 .venv/
 .env
 archive/
@@ -7,5 +6,4 @@ runs/detect/train
 runs/detect/train2
 outputs/
 data/
-*.pt
-*.onnx
+

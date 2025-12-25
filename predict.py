@@ -54,8 +54,38 @@ def pad_bbox(bbox: Tuple[float, float, float, float], w: int, h: int, px: float,
     return [float(x1p), float(y1p), float(x2p), float(y2p)]
 
 
-def clean_background(img: Image.Image, area_percentile: float = 50.0) -> Image.Image:
-    gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+def clean_background(
+    img: Image.Image,
+    area_percentile: float = 50.0,
+    color_clean: bool = False,
+) -> Image.Image:
+    rgb = np.array(img)
+    area_percentile = max(0.0, min(100.0, area_percentile))
+
+    if color_clean:
+        lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+        data = lab.reshape((-1, 3)).astype(np.float32)
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 1.0)
+        _, labels_k, centers = cv2.kmeans(data, 3, None, criteria, 5, cv2.KMEANS_PP_CENTERS)
+        centers = centers.astype(np.float32)
+
+        chroma = np.sqrt((centers[:, 1] - 128.0) ** 2 + (centers[:, 2] - 128.0) ** 2)
+        if chroma.max() > 8.0:
+            target = int(np.argmax(chroma))
+            mask = (labels_k.reshape(lab.shape[:2]) == target).astype(np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            mask = (mask > 0).astype(np.uint8)
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+            if num_labels > 1:
+                areas = stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
+                thresh = max(12.0, float(np.percentile(areas, area_percentile)))
+                keep_labels = {i + 1 for i, area in enumerate(areas) if area > thresh}
+                mask = np.isin(labels, list(keep_labels))
+                out = np.full(mask.shape, 255, dtype=np.uint8)
+                out[mask] = 0
+                return Image.fromarray(out)
+
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (3, 3), 0)
     _, bin_img = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
@@ -66,7 +96,6 @@ def clean_background(img: Image.Image, area_percentile: float = 50.0) -> Image.I
         return Image.fromarray(bin_img)
 
     areas = stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
-    area_percentile = max(0.0, min(100.0, area_percentile))
     # Drop more small detached components while keeping thin strokes by area only.
     thresh = max(12.0, float(np.percentile(areas, area_percentile)))
     keep_labels = {i + 1 for i, area in enumerate(areas) if area > thresh}
@@ -116,11 +145,16 @@ def predict(
 
 
 def crop_and_clean(
-    image: Image.Image, det: Detection, area_percentile: float = 50.0
+    image: Image.Image,
+    det: Detection,
+    area_percentile: float = 50.0,
+    color_clean: bool = False,
 ) -> Image.Image:
     x1, y1, x2, y2 = map(int, det.bbox_padded)
     roi = image.crop((x1, y1, x2, y2))
-    return clean_background(roi, area_percentile=area_percentile)
+    return clean_background(
+        roi, area_percentile=area_percentile, color_clean=color_clean
+    )
 
 
 def main() -> None:
@@ -134,6 +168,8 @@ def main() -> None:
     parser.add_argument("--padding-y", type=float, default=0.15)
     parser.add_argument("--grayscale-inference", action="store_true")
     parser.add_argument("--clean", action="store_true", help="Clean background on crops")
+    parser.add_argument("--color-clean", action="store_true", help="Use color-based cleanup")
+    parser.add_argument("--clean-area-percentile", type=float, default=50.0)
     parser.add_argument("--out", default="prediction.json")
     args = parser.parse_args()
 
@@ -157,7 +193,12 @@ def main() -> None:
         os.makedirs(crops_dir, exist_ok=True)
         for i, det_dict in enumerate(result["detections"]):
             det = Detection(**det_dict)
-            cleaned = crop_and_clean(img, det)
+            cleaned = crop_and_clean(
+                img,
+                det,
+                area_percentile=args.clean_area_percentile,
+                color_clean=args.color_clean,
+            )
             cleaned.save(f"{crops_dir}/sig_{i}.png")
 
     with open(args.out, "w", encoding="utf-8") as f:
