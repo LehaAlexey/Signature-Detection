@@ -58,11 +58,42 @@ def clean_background(
     img: Image.Image,
     area_percentile: float = 50.0,
     color_clean: bool = False,
+    hsv_clean: bool = False,
+    hsv_h_min: int = 113,
+    hsv_h_max: int = 156,
+    hsv_s_min: int = 0,
+    hsv_v_min: int = 7,
 ) -> Image.Image:
     rgb = np.array(img)
     area_percentile = max(0.0, min(100.0, area_percentile))
 
-    if color_clean:
+    mask = None
+    if hsv_clean:
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        h_min = max(0, min(179, int(hsv_h_min)))
+        h_max = max(0, min(179, int(hsv_h_max)))
+        s_min = max(0, min(255, int(hsv_s_min)))
+        v_min = max(0, min(255, int(hsv_v_min)))
+        if h_min <= h_max:
+            lower = np.array([h_min, s_min, v_min], dtype=np.uint8)
+            upper = np.array([h_max, 255, 255], dtype=np.uint8)
+            mask = cv2.inRange(hsv, lower, upper).astype(np.uint8)
+        else:
+            lower1 = np.array([0, s_min, v_min], dtype=np.uint8)
+            upper1 = np.array([h_max, 255, 255], dtype=np.uint8)
+            lower2 = np.array([h_min, s_min, v_min], dtype=np.uint8)
+            upper2 = np.array([179, 255, 255], dtype=np.uint8)
+            mask1 = cv2.inRange(hsv, lower1, upper1).astype(np.uint8)
+            mask2 = cv2.inRange(hsv, lower2, upper2).astype(np.uint8)
+            mask = cv2.bitwise_or(mask1, mask2)
+
+        h, w = rgb.shape[:2]
+        min_pixels = max(10, int(0.001 * h * w))
+        if np.count_nonzero(mask) < min_pixels:
+            lower = np.array([0, s_min, v_min], dtype=np.uint8)
+            upper = np.array([179, 255, 255], dtype=np.uint8)
+            mask = cv2.inRange(hsv, lower, upper).astype(np.uint8)
+    elif color_clean:
         lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
         data = lab.reshape((-1, 3)).astype(np.float32)
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 1.0)
@@ -73,36 +104,36 @@ def clean_background(
         if chroma.max() > 8.0:
             target = int(np.argmax(chroma))
             mask = (labels_k.reshape(lab.shape[:2]) == target).astype(np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-            mask = (mask > 0).astype(np.uint8)
-            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-            if num_labels > 1:
-                areas = stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
-                thresh = max(12.0, float(np.percentile(areas, area_percentile)))
-                keep_labels = {i + 1 for i, area in enumerate(areas) if area > thresh}
-                mask = np.isin(labels, list(keep_labels))
-                out = np.full(mask.shape, 255, dtype=np.uint8)
-                out[mask] = 0
-                return Image.fromarray(out)
 
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    _, bin_img = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if mask is None:
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, bin_img = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Foreground is dark strokes.
-    foreground = (bin_img == 0).astype(np.uint8)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(foreground, 8)
-    if num_labels <= 2:
-        return Image.fromarray(bin_img)
+        foreground = (bin_img == 0).astype(np.uint8)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(foreground, 8)
+        if num_labels <= 2:
+            return Image.fromarray(rgb)
 
-    areas = stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
-    # Drop more small detached components while keeping thin strokes by area only.
-    thresh = max(12.0, float(np.percentile(areas, area_percentile)))
-    keep_labels = {i + 1 for i, area in enumerate(areas) if area > thresh}
+        areas = stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
+        thresh = max(12.0, float(np.percentile(areas, area_percentile)))
+        keep_labels = {i + 1 for i, area in enumerate(areas) if area > thresh}
+        mask = np.isin(labels, list(keep_labels))
+    else:
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        if num_labels <= 1:
+            return Image.fromarray(rgb)
 
-    mask = np.isin(labels, list(keep_labels))
-    out = np.full_like(bin_img, 255, dtype=np.uint8)
-    out[mask] = 0
+        areas = stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
+        thresh = max(12.0, float(np.percentile(areas, area_percentile)))
+        keep_labels = {i + 1 for i, area in enumerate(areas) if area > thresh}
+        mask = np.isin(labels, list(keep_labels))
+
+    out = np.full_like(rgb, 255, dtype=np.uint8)
+    out[mask] = rgb[mask]
     return Image.fromarray(out)
 
 
@@ -149,11 +180,23 @@ def crop_and_clean(
     det: Detection,
     area_percentile: float = 50.0,
     color_clean: bool = False,
+    hsv_clean: bool = False,
+    hsv_h_min: int = 80,
+    hsv_h_max: int = 160,
+    hsv_s_min: int = 30,
+    hsv_v_min: int = 30,
 ) -> Image.Image:
     x1, y1, x2, y2 = map(int, det.bbox_padded)
     roi = image.crop((x1, y1, x2, y2))
     return clean_background(
-        roi, area_percentile=area_percentile, color_clean=color_clean
+        roi,
+        area_percentile=area_percentile,
+        color_clean=color_clean,
+        hsv_clean=hsv_clean,
+        hsv_h_min=hsv_h_min,
+        hsv_h_max=hsv_h_max,
+        hsv_s_min=hsv_s_min,
+        hsv_v_min=hsv_v_min,
     )
 
 
@@ -169,6 +212,11 @@ def main() -> None:
     parser.add_argument("--grayscale-inference", action="store_true")
     parser.add_argument("--clean", action="store_true", help="Clean background on crops")
     parser.add_argument("--color-clean", action="store_true", help="Use color-based cleanup")
+    parser.add_argument("--hsv-clean", action="store_true", help="Use HSV blue mask cleanup")
+    parser.add_argument("--hsv-h-min", type=int, default=113)
+    parser.add_argument("--hsv-h-max", type=int, default=156)
+    parser.add_argument("--hsv-s-min", type=int, default=0)
+    parser.add_argument("--hsv-v-min", type=int, default=7)
     parser.add_argument("--clean-area-percentile", type=float, default=50.0)
     parser.add_argument("--out", default="prediction.json")
     args = parser.parse_args()
@@ -198,6 +246,11 @@ def main() -> None:
                 det,
                 area_percentile=args.clean_area_percentile,
                 color_clean=args.color_clean,
+                hsv_clean=args.hsv_clean,
+                hsv_h_min=args.hsv_h_min,
+                hsv_h_max=args.hsv_h_max,
+                hsv_s_min=args.hsv_s_min,
+                hsv_v_min=args.hsv_v_min,
             )
             cleaned.save(f"{crops_dir}/sig_{i}.png")
 
