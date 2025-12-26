@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import io
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple, Union
 
@@ -23,6 +25,8 @@ class Detection:
 
 
 def load_image(image: ImageInput, grayscale: bool) -> Image.Image:
+    if image is None:
+        raise TypeError("Image is required")
     if isinstance(image, str):
         img = Image.open(image)
     elif isinstance(image, bytes):
@@ -31,6 +35,26 @@ def load_image(image: ImageInput, grayscale: bool) -> Image.Image:
         img = image
     elif isinstance(image, np.ndarray):
         img = Image.fromarray(image)
+    elif isinstance(image, dict):
+        if "path" in image and image["path"]:
+            img = Image.open(image["path"])
+        elif "name" in image and image["name"] and os.path.exists(image["name"]):
+            img = Image.open(image["name"])
+        elif "data" in image and image["data"]:
+            data = image["data"]
+            if isinstance(data, str):
+                payload = data.split(",", 1)[1] if "," in data else data
+                img = Image.open(io.BytesIO(base64.b64decode(payload)))
+            elif isinstance(data, (bytes, bytearray)):
+                img = Image.open(io.BytesIO(data))
+            else:
+                raise TypeError("Unsupported image input type")
+        else:
+            raise TypeError("Unsupported image input type")
+    elif hasattr(image, "image"):
+        img = image.image
+    elif hasattr(image, "path"):
+        img = Image.open(image.path)
     else:
         raise TypeError("Unsupported image input type")
 

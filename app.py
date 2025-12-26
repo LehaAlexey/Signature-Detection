@@ -71,7 +71,7 @@ async def predict_image(
         max_det=max_det,
         padding_x=padding_x,
         padding_y=padding_y,
-        grayscale_inference=grayscale_inference,
+            grayscale_inference=False,
     )
 
     if clean:
@@ -137,7 +137,7 @@ async def predict_pdf(
             max_det=max_det,
             padding_x=padding_x,
             padding_y=padding_y,
-            grayscale_inference=grayscale_inference,
+            grayscale_inference=False,
         )
         if clean:
             cleaned: List[bytes] = []
@@ -172,11 +172,8 @@ def gradio_ui() -> gr.Blocks:
         max_det,
         padding_x,
         padding_y,
-        grayscale_inference,
-        clean,
+        clean_mode,
         clean_area_percentile,
-        color_clean,
-        hsv_clean,
         hsv_h_min,
         hsv_h_max,
         hsv_s_min,
@@ -191,7 +188,7 @@ def gradio_ui() -> gr.Blocks:
             max_det=max_det,
             padding_x=padding_x,
             padding_y=padding_y,
-            grayscale_inference=grayscale_inference,
+            grayscale_inference=False,
         )
         img = load_image(image, grayscale=False)
         annotated = img.copy()
@@ -199,33 +196,47 @@ def gradio_ui() -> gr.Blocks:
         for det in result["detections"]:
             x1, y1, x2, y2 = det["bbox_padded"]
             draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
-        cleaned_gallery = []
+        output_gallery = []
         cleaned_zip_path = None
-        if clean:
-            for det in result["detections"]:
-                det_obj = Detection(**det)
-                cleaned_gallery.append(
-                    crop_and_clean(
-                        img,
-                        det_obj,
-                        area_percentile=clean_area_percentile,
-                        color_clean=color_clean,
-                        hsv_clean=hsv_clean,
-                        hsv_h_min=hsv_h_min,
-                        hsv_h_max=hsv_h_max,
-                        hsv_s_min=hsv_s_min,
-                        hsv_v_min=hsv_v_min,
-                    )
+        for det in result["detections"]:
+            det_obj = Detection(**det)
+            if clean_mode == "HSV":
+                out_img = crop_and_clean(
+                    img,
+                    det_obj,
+                    area_percentile=clean_area_percentile,
+                    color_clean=False,
+                    hsv_clean=True,
+                    hsv_h_min=hsv_h_min,
+                    hsv_h_max=hsv_h_max,
+                    hsv_s_min=hsv_s_min,
+                    hsv_v_min=hsv_v_min,
                 )
-            if cleaned_gallery:
-                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                    cleaned_zip_path = tmp.name
-                with zipfile.ZipFile(cleaned_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for idx, cleaned in enumerate(cleaned_gallery):
-                        buf = io.BytesIO()
-                        cleaned.save(buf, format="PNG")
-                        zf.writestr(f"signature_{idx}.png", buf.getvalue())
-        return np.array(annotated), cleaned_gallery, cleaned_zip_path
+            elif clean_mode == "Площадь":
+                out_img = crop_and_clean(
+                    img,
+                    det_obj,
+                    area_percentile=clean_area_percentile,
+                    color_clean=False,
+                    hsv_clean=False,
+                    hsv_h_min=hsv_h_min,
+                    hsv_h_max=hsv_h_max,
+                    hsv_s_min=hsv_s_min,
+                    hsv_v_min=hsv_v_min,
+                )
+            else:
+                x1, y1, x2, y2 = map(int, det_obj.bbox_padded)
+                out_img = img.crop((x1, y1, x2, y2))
+            output_gallery.append(out_img)
+        if output_gallery:
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                cleaned_zip_path = tmp.name
+            with zipfile.ZipFile(cleaned_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for idx, cleaned in enumerate(output_gallery):
+                    buf = io.BytesIO()
+                    cleaned.save(buf, format="PNG")
+                    zf.writestr(f"signature_{idx}.png", buf.getvalue())
+        return np.array(annotated), output_gallery, cleaned_zip_path
 
     with gr.Blocks(title="Signature Detector") as demo:
         gr.Markdown("Signature Detector")
@@ -233,31 +244,36 @@ def gradio_ui() -> gr.Blocks:
             inp = gr.Image(type="pil", label="Входное изображение")
             out_img = gr.Image(type="numpy", label="Детекции")
 
-        clean = gr.Checkbox(value=False, label="Очистка фона")
+        clean_mode = gr.Radio(
+            choices=["Без очистки", "HSV", "Площадь"],
+            value="Без очистки",
+            label="Режим очистки",
+        )
         run_btn = gr.Button("Запуск")
 
         with gr.Accordion("Расширенные настройки", open=False):
-            conf = gr.Slider(0.05, 0.9, value=0.15, step=0.01, label="Порог уверенности")
-            iou = gr.Slider(0.05, 0.9, value=0.45, step=0.01, label="Порог IoU")
-            max_det = gr.Slider(1, 500, value=178, step=1, label="Макс. число детекций")
-            padding_x = gr.Slider(0.0, 0.5, value=0.06, step=0.01, label="Паддинг по ширине")
-            padding_y = gr.Slider(0.0, 0.5, value=0.06, step=0.01, label="Паддинг по высоте")
-            grayscale_inference = gr.Checkbox(value=False, label="Градации серого")
-            clean_area_percentile = gr.Slider(
-                0.0,
-                100.0,
-                value=50.0,
-                step=1.0,
-                label="Порог площади, перцентиль",
-            )
-            color_clean = gr.Checkbox(value=False, label="Цветная очистка")
-            hsv_clean = gr.Checkbox(value=False, label="HSV очистка (hsv_clean)")
-            hsv_h_min = gr.Slider(0, 179, value=113, step=1, label="HSV H минимум")
-            hsv_h_max = gr.Slider(0, 179, value=156, step=1, label="HSV H максимум")
-            hsv_s_min = gr.Slider(0, 255, value=0, step=1, label="HSV S минимум")
-            hsv_v_min = gr.Slider(0, 255, value=7, step=1, label="HSV V минимум")
+            with gr.Row():
+                conf = gr.Slider(0.05, 0.9, value=0.15, step=0.01, label="Порог уверенности")
+                iou = gr.Slider(0.05, 0.9, value=0.45, step=0.01, label="Порог IoU")
+                max_det = gr.Slider(1, 500, value=178, step=1, label="Макс. число детекций")
+            with gr.Row():
+                padding_x = gr.Slider(0.0, 0.5, value=0.06, step=0.01, label="Паддинг по ширине")
+                padding_y = gr.Slider(0.0, 0.5, value=0.06, step=0.01, label="Паддинг по высоте")
+                clean_area_percentile = gr.Slider(
+                    0.0,
+                    100.0,
+                    value=50.0,
+                    step=1.0,
+                    label="Порог площади, перцентиль",
+                )
+            with gr.Row():
+                hsv_h_min = gr.Slider(0, 179, value=113, step=1, label="HSV H минимум")
+                hsv_h_max = gr.Slider(0, 179, value=156, step=1, label="HSV H максимум")
+            with gr.Row():
+                hsv_s_min = gr.Slider(0, 255, value=0, step=1, label="HSV S минимум")
+                hsv_v_min = gr.Slider(0, 255, value=7, step=1, label="HSV V минимум")
 
-        run_btn_bottom = gr.Button("??????")
+        run_btn_bottom = gr.Button("Запуск")
 
         out_gallery = gr.Gallery(
             label="Очищенные подписи",
@@ -275,11 +291,8 @@ def gradio_ui() -> gr.Blocks:
                 max_det,
                 padding_x,
                 padding_y,
-                grayscale_inference,
-                clean,
+                clean_mode,
                 clean_area_percentile,
-                color_clean,
-                hsv_clean,
                 hsv_h_min,
                 hsv_h_max,
                 hsv_s_min,
@@ -296,11 +309,8 @@ def gradio_ui() -> gr.Blocks:
                 max_det,
                 padding_x,
                 padding_y,
-                grayscale_inference,
-                clean,
+                clean_mode,
                 clean_area_percentile,
-                color_clean,
-                hsv_clean,
                 hsv_h_min,
                 hsv_h_max,
                 hsv_s_min,
